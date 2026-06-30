@@ -1,0 +1,539 @@
+#!/bin/sh
+# Clash Config Generator for OpenWrt
+# Convert proxy URIs to OpenClash YAML config
+# Version: 1.0.0
+
+# --- Helper functions ---
+
+# Base64 decode (try multiple implementations)
+b64decode() {
+  printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | openssl base64 -d -A 2>/dev/null
+}
+
+# URL decode
+urldecode() {
+  printf '%b' "$(echo "$1" | sed 's/+/ /g; s/%\([0-9a-fA-F][0-9a-fA-F]\)/\\x\1/g')"
+}
+
+# Pad and decode base64
+padded_decode() {
+  local b64="$1"
+  local len=${#b64}
+  local mod=$((len % 4))
+  [ "$mod" -ne 0 ] && b64="${b64}$(printf '%0.s=' $(seq 1 $((4 - mod))))"
+  b64decode "$b64"
+}
+
+# Quote a string for YAML if it contains special chars
+yaml_quote() {
+  local val="$1"
+  # Always quote - safer and simpler for proxy names with brackets/special chars
+  printf '"%s"' "$(echo "$val" | sed 's/"/\\"/g')"
+}
+
+# --- VMess ---
+
+vmess_to_yaml() {
+  local json="$1"
+  local name server port uuid aid cipher net path host tls
+
+  name="$(echo "$json" | sed -n 's/.*"ps"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  server="$(echo "$json" | sed -n 's/.*"add"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  port="$(echo "$json" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
+  uuid="$(echo "$json" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  aid="$(echo "$json" | sed -n 's/.*"aid"[[:space:]]*:[[:space:]]*"\{0,1\}\([0-9]*\).*/\1/p')"
+  cipher="$(echo "$json" | sed -n 's/.*"scy"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  net="$(echo "$json" | sed -n 's/.*"net"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  path="$(echo "$json" | sed -n 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  host="$(echo "$json" | sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  tls="$(echo "$json" | sed -n 's/.*"tls"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+
+  [ -z "$name" ] && name="VMess"
+  [ -z "$cipher" ] && cipher="auto"
+  [ -z "$aid" ] && aid="0"
+  [ -z "$path" ] && path="/"
+  [ -z "$net" ] && net="tcp"
+
+  printf -- '- name: %s\n' "$(yaml_quote "$name")"
+  printf '  type: vmess\n'
+  printf '  server: %s\n' "$server"
+  printf '  port: %s\n' "$port"
+  printf '  uuid: %s\n' "$uuid"
+  printf '  alterId: %s\n' "$aid"
+  printf '  cipher: %s\n' "$cipher"
+  printf '  udp: true\n'
+
+  if [ -n "$tls" ] && [ "$tls" != "none" ]; then
+    printf '  tls: true\n'
+  else
+    printf '  tls: false\n'
+  fi
+  printf '  skip-cert-verify: true\n'
+
+  if [ "$net" = "ws" ]; then
+    printf '  network: ws\n'
+    printf '  ws-opts:\n'
+    printf '    path: %s\n' "$path"
+    if [ -n "$host" ]; then
+      printf '    headers:\n'
+      printf '      Host: %s\n' "$host"
+    fi
+  elif [ "$net" = "grpc" ]; then
+    printf '  network: grpc\n'
+    printf '  grpc-opts:\n'
+    printf '    grpc-service-name: %s\n' "${path#/}"
+  fi
+}
+
+# --- VLESS ---
+
+vless_to_yaml() {
+  local uri="$1"
+  local body="${uri#vless://}"
+  local fragment="" query="" uuid hostport host port
+
+  if echo "$body" | grep -q '#'; then
+    fragment="$(urldecode "$(echo "$body" | cut -d'#' -f2-)")"
+    body="$(echo "$body" | cut -d'#' -f1)"
+  fi
+  if echo "$body" | grep -q '?'; then
+    query="$(echo "$body" | cut -d'?' -f2-)"
+    body="$(echo "$body" | cut -d'?' -f1)"
+  fi
+
+  uuid="$(echo "$body" | cut -d'@' -f1)"
+  hostport="$(echo "$body" | cut -d'@' -f2-)"
+
+  if echo "$hostport" | grep -q '^\['; then
+    host="$(echo "$hostport" | sed 's/\[\([^]]*\)\].*/\1/')"
+    port="$(echo "$hostport" | sed 's/\[[^]]*\]://')"
+  else
+    host="$(echo "$hostport" | rev | cut -d':' -f2- | rev)"
+    port="$(echo "$hostport" | rev | cut -d':' -f1 | rev)"
+  fi
+  [ -z "$port" ] && port="443"
+
+  local net path hostHeader security flow fp pbk sid sni
+  net="$(echo "$query" | tr '&' '\n' | sed -n 's/^type=//p')"
+  path="$(urldecode "$(echo "$query" | tr '&' '\n' | sed -n 's/^path=//p')")"
+  hostHeader="$(urldecode "$(echo "$query" | tr '&' '\n' | sed -n 's/^host=//p')")"
+  [ -z "$hostHeader" ] && hostHeader="$host"
+  security="$(echo "$query" | tr '&' '\n' | sed -n 's/^security=//p')"
+  flow="$(echo "$query" | tr '&' '\n' | sed -n 's/^flow=//p')"
+  fp="$(echo "$query" | tr '&' '\n' | sed -n 's/^fp=//p')"
+  pbk="$(echo "$query" | tr '&' '\n' | sed -n 's/^pbk=//p')"
+  sid="$(echo "$query" | tr '&' '\n' | sed -n 's/^sid=//p')"
+  sni="$(urldecode "$(echo "$query" | tr '&' '\n' | sed -n 's/^sni=//p')")"
+
+  [ -z "$net" ] && net="tcp"
+  [ -z "$path" ] && path="/"
+  [ -z "$fragment" ] && fragment="VLESS-${host}"
+
+  printf -- '- name: %s\n' "$(yaml_quote "$fragment")"
+  printf '  type: vless\n'
+  printf '  server: %s\n' "$host"
+  printf '  port: %s\n' "$port"
+  printf '  uuid: %s\n' "$uuid"
+  printf '  udp: true\n'
+
+  if [ -n "$security" ] && [ "$security" != "none" ]; then
+    printf '  tls: true\n'
+    if [ -n "$sni" ]; then
+      printf '  servername: %s\n' "$sni"
+    elif [ -n "$hostHeader" ]; then
+      printf '  servername: %s\n' "$hostHeader"
+    fi
+    [ -n "$fp" ] && printf '  client-fingerprint: %s\n' "$fp"
+    [ -n "$flow" ] && printf '  flow: %s\n' "$flow"
+  else
+    printf '  tls: false\n'
+  fi
+  printf '  skip-cert-verify: true\n'
+
+  if [ "$net" = "ws" ]; then
+    printf '  network: ws\n'
+    printf '  ws-opts:\n'
+    printf '    path: %s\n' "$path"
+    if [ -n "$hostHeader" ] && [ "$hostHeader" != "$host" ]; then
+      printf '    headers:\n'
+      printf '      Host: %s\n' "$hostHeader"
+    fi
+  elif [ "$net" = "grpc" ]; then
+    printf '  network: grpc\n'
+    printf '  grpc-opts:\n'
+    printf '    grpc-service-name: %s\n' "${path#/}"
+  fi
+
+  if [ -n "$pbk" ]; then
+    printf '  reality-opts:\n'
+    printf '    public-key: %s\n' "$pbk"
+    printf '    short-id: %s\n' "${sid:-}"
+  fi
+}
+
+# --- Shadowsocks ---
+
+ss_to_yaml() {
+  local uri="$1"
+  local body="${uri#ss://}"
+  local fragment="" host port method password
+
+  if echo "$body" | grep -q '#'; then
+    fragment="$(urldecode "$(echo "$body" | cut -d'#' -f2-)")"
+    body="$(echo "$body" | cut -d'#' -f1)"
+  fi
+
+  local userinfo hostport
+  userinfo="$(echo "$body" | cut -d'@' -f1)"
+  hostport="$(echo "$body" | cut -d'@' -f2-)"
+
+  local decoded
+  decoded="$(padded_decode "$userinfo")"
+  method="$(echo "$decoded" | cut -d':' -f1)"
+  password="$(echo "$decoded" | cut -d':' -f2-)"
+
+  if echo "$hostport" | grep -q '^\['; then
+    host="$(echo "$hostport" | sed 's/\[\([^]]*\)\].*/\1/')"
+    port="$(echo "$hostport" | sed 's/\[[^]]*\]://')"
+  else
+    host="$(echo "$hostport" | rev | cut -d':' -f2- | rev)"
+    port="$(echo "$hostport" | rev | cut -d':' -f1 | rev)"
+  fi
+
+  [ -z "$port" ] && port="8388"
+  [ -z "$fragment" ] && fragment="SS-${host}"
+
+  printf -- '- name: %s\n' "$(yaml_quote "$fragment")"
+  printf '  type: ss\n'
+  printf '  server: %s\n' "$host"
+  printf '  port: %s\n' "$port"
+  printf '  cipher: %s\n' "$method"
+  printf '  password: %s\n' "$password"
+  printf '  udp: true\n'
+  printf '  tls: false\n'
+  printf '  skip-cert-verify: true\n'
+}
+
+# --- Trojan ---
+
+trojan_to_yaml() {
+  local uri="$1"
+  local body="${uri#trojan://}"
+  local fragment="" query="" password hostport host port
+
+  if echo "$body" | grep -q '#'; then
+    fragment="$(urldecode "$(echo "$body" | cut -d'#' -f2-)")"
+    body="$(echo "$body" | cut -d'#' -f1)"
+  fi
+  if echo "$body" | grep -q '?'; then
+    query="$(echo "$body" | cut -d'?' -f2-)"
+    body="$(echo "$body" | cut -d'?' -f1)"
+  fi
+
+  password="$(echo "$body" | cut -d'@' -f1)"
+  hostport="$(echo "$body" | cut -d'@' -f2-)"
+
+  if echo "$hostport" | grep -q '^\['; then
+    host="$(echo "$hostport" | sed 's/\[\([^]]*\)\].*/\1/')"
+    port="$(echo "$hostport" | sed 's/\[[^]]*\]://')"
+  elif echo "$hostport" | grep -q ':'; then
+    host="$(echo "$hostport" | rev | cut -d':' -f2- | rev)"
+    port="$(echo "$hostport" | rev | cut -d':' -f1 | rev)"
+  else
+    host="$hostport"
+    port="443"
+  fi
+
+  local net path hostHeader sni security fp alpn
+  net="$(echo "$query" | tr '&' '\n' | sed -n 's/^type=//p')"
+  path="$(urldecode "$(echo "$query" | tr '&' '\n' | sed -n 's/^path=//p')")"
+  hostHeader="$(urldecode "$(echo "$query" | tr '&' '\n' | sed -n 's/^host=//p')")"
+  [ -z "$hostHeader" ] && hostHeader="$host"
+  sni="$(urldecode "$(echo "$query" | tr '&' '\n' | sed -n 's/^sni=//p')")"
+  [ -z "$sni" ] && sni="$host"
+  security="$(echo "$query" | tr '&' '\n' | sed -n 's/^security=//p')"
+  fp="$(echo "$query" | tr '&' '\n' | sed -n 's/^fp=//p')"
+  alpn="$(urldecode "$(echo "$query" | tr '&' '\n' | sed -n 's/^alpn=//p')")"
+
+  [ -z "$net" ] && net="tcp"
+  [ -z "$path" ] && path="/"
+  [ -z "$fragment" ] && fragment="Trojan-${host}"
+
+  printf -- '- name: %s\n' "$(yaml_quote "$fragment")"
+  printf '  type: trojan\n'
+  printf '  server: %s\n' "$host"
+  printf '  port: %s\n' "$port"
+  printf '  password: %s\n' "$password"
+  printf '  udp: true\n'
+  printf '  skip-cert-verify: true\n'
+
+  if [ -n "$security" ] && [ "$security" != "none" ]; then
+    printf '  tls: true\n'
+    if [ -n "$sni" ]; then
+      printf '  sni: %s\n' "$sni"
+    elif [ -n "$hostHeader" ]; then
+      printf '  sni: %s\n' "$hostHeader"
+    fi
+    [ -n "$fp" ] && printf '  client-fingerprint: %s\n' "$fp"
+    if [ -n "$alpn" ]; then
+      printf '  alpn:\n'
+      echo "$alpn" | tr ',' '\n' | while read -r a; do
+        [ -n "$a" ] && printf '    - %s\n' "$a"
+      done
+    fi
+  else
+    printf '  tls: false\n'
+  fi
+
+  if [ "$net" = "ws" ]; then
+    printf '  network: ws\n'
+    printf '  ws-opts:\n'
+    printf '    path: %s\n' "$path"
+    if [ -n "$hostHeader" ] && [ "$hostHeader" != "$host" ]; then
+      printf '    headers:\n'
+      printf '      Host: %s\n' "$hostHeader"
+    fi
+  elif [ "$net" = "grpc" ]; then
+    printf '  network: grpc\n'
+    printf '  grpc-opts:\n'
+    printf '    grpc-service-name: %s\n' "${path#/}"
+  fi
+}
+
+# --- Auto-detect & convert ---
+
+convert_uri() {
+  local uri="$1"
+  case "$uri" in
+    vmess://*)
+      local json
+      json="$(padded_decode "${uri#vmess://}")"
+      [ -n "$json" ] && vmess_to_yaml "$json"
+      ;;
+    vless://*)
+      vless_to_yaml "$uri"
+      ;;
+    ss://*)
+      ss_to_yaml "$uri"
+      ;;
+    trojan://*)
+      trojan_to_yaml "$uri"
+      ;;
+  esac
+}
+
+# --- Config sections ---
+
+generate_dns() {
+  local mode="${1:-redir-host}"
+  printf 'dns:\n'
+  printf '  enable: true\n'
+  printf '  ipv6: false\n'
+  printf '  enhanced-mode: %s\n' "$mode"
+  printf '  fake-ip-range: 198.18.0.1/16\n'
+  printf '  nameserver:\n'
+  printf '    - 8.8.8.8\n'
+  printf '    - 1.1.1.1\n'
+  printf '    - 114.114.114.114\n'
+  printf '  fallback:\n'
+  printf '    - tls://8.8.8.8:853\n'
+  printf '    - tls://1.1.1.1:853\n'
+  if [ "$mode" = "fake-ip" ]; then
+    printf '  fake-ip-filter:\n'
+    printf "    - '*.lan'\n"
+    printf '    - localhost.ptlogin2.qq.com\n'
+    printf "    - '+.srv.nintendo.net'\n"
+    printf "    - '+.stun.playstation.net'\n"
+    printf "    - 'xbox.*.microsoft.com'\n"
+    printf "    - '+.xboxlive.com'\n"
+    printf "    - '+.ntp.org'\n"
+  fi
+}
+
+generate_proxy_groups() {
+  local names_file="$1"
+  printf 'proxy-groups:\n'
+  printf '  - name: PROXY\n'
+  printf '    type: select\n'
+  printf '    proxies:\n'
+  while read -r n; do [ -n "$n" ] && printf '      - %s\n' "$n"; done < "$names_file"
+  printf '      - DIRECT\n'
+  printf '      - REJECT\n'
+  printf '  - name: Streaming\n'
+  printf '    type: select\n'
+  printf '    proxies:\n'
+  while read -r n; do [ -n "$n" ] && printf '      - %s\n' "$n"; done < "$names_file"
+  printf '      - PROXY\n'
+  printf '      - DIRECT\n'
+  printf '  - name: AdBlock\n'
+  printf '    type: select\n'
+  printf '    proxies:\n'
+  printf '      - REJECT\n'
+  printf '      - DIRECT\n'
+  printf '      - PROXY\n'
+  printf '  - name: Auto\n'
+  printf '    type: url-test\n'
+  printf '    proxies:\n'
+  while read -r n; do [ -n "$n" ] && printf '      - %s\n' "$n"; done < "$names_file"
+  printf "    url: 'http://www.gstatic.com/generate_204'\n"
+  printf '    interval: 300\n'
+}
+
+generate_rules() {
+  printf 'rules:\n'
+  printf '  - DOMAIN-SUFFIX,google.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,google.co.id,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,youtube.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,ytimg.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,yt3.ggpht.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,github.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,githubusercontent.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,telegram.org,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,t.me,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,telegram.me,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,whatsapp.net,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,wa.me,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,whatsapp.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,netflix.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,nflxvideo.net,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,nflximg.net,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,nflximg.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,spotify.com,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,scdn.co,PROXY\n'
+  printf '  - DOMAIN-KEYWORD,google,PROXY\n'
+  printf '  - DOMAIN-KEYWORD,youtube,PROXY\n'
+  printf '  - DOMAIN-KEYWORD,telegram,PROXY\n'
+  printf '  - DOMAIN-KEYWORD,whatsapp,PROXY\n'
+  printf '  - DOMAIN-KEYWORD,netflix,PROXY\n'
+  printf '  - DOMAIN-SUFFIX,ad.com,AdBlock\n'
+  printf '  - DOMAIN-SUFFIX,adservice.google.com,AdBlock\n'
+  printf '  - DOMAIN-SUFFIX,pagead2.googlesyndication.com,AdBlock\n'
+  printf '  - DOMAIN-KEYWORD,adservice,AdBlock\n'
+  printf '  - DOMAIN-KEYWORD,adsrv,AdBlock\n'
+  printf '  - GEOIP,ID,DIRECT\n'
+  printf '  - GEOIP,CN,DIRECT\n'
+  printf '  - MATCH,PROXY\n'
+}
+
+# --- Main ---
+
+main() {
+  local dns_mode="redir-host" proxies_only=0 uri_file=""
+
+  while getopts "f:m:ph" opt; do
+    case "$opt" in
+      f) uri_file="$OPTARG" ;;
+      m) dns_mode="$OPTARG" ;;
+      p) proxies_only=1 ;;
+      h)
+        printf '\033[1;36mClash Config Generator\033[0m - OpenWrt Edition\n'
+        printf '\nUsage:\n'
+        printf '  clash-config-gen [options] [URI ...]\n'
+        printf '  clash-config-gen [options] -f <file>\n'
+        printf '\nOptions:\n'
+        printf '  -f FILE   Read URIs from file (one per line)\n'
+        printf '  -m MODE   DNS mode: redir-host (default), fake-ip\n'
+        printf '  -p        Output proxies section only (for paste to OpenClash)\n'
+        printf '  -h        Show this help\n'
+        printf '\nSupported: vmess:// vless:// ss:// trojan://\n'
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+  done
+  shift $((OPTIND - 1))
+
+  # Collect all input
+  local tmp_input
+  tmp_input="$(mktemp)"
+
+  for arg in "$@"; do
+    echo "$arg" >> "$tmp_input"
+  done
+
+  if [ -n "$uri_file" ] && [ -f "$uri_file" ]; then
+    cat "$uri_file" >> "$tmp_input"
+  fi
+
+  if [ ! -t 0 ]; then
+    cat >> "$tmp_input"
+  fi
+
+  if [ ! -s "$tmp_input" ]; then
+    printf '\033[1;31mError:\033[0m No proxy URIs provided\n' >&2
+    rm -f "$tmp_input"
+    exit 1
+  fi
+
+  # Try base64 decode the whole input (subscription format)
+  local decoded
+  decoded="$(b64decode "$(cat "$tmp_input" | tr -d '\n')")" 2>/dev/null || true
+  if [ -n "$decoded" ] && echo "$decoded" | grep -q '://'; then
+    echo "$decoded" > "$tmp_input"
+  fi
+
+  # Process each line
+  local tmp_proxies tmp_names
+  tmp_proxies="$(mktemp)"
+  tmp_names="$(mktemp)"
+
+  while read -r line; do
+    line="$(echo "$line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -z "$line" ] && continue
+    case "$line" in
+      vmess://*|vless://*|ss://*|trojan://*) ;;
+      *) continue ;;
+    esac
+
+    local yaml_block name
+    yaml_block="$(convert_uri "$line")"
+    if [ -n "$yaml_block" ]; then
+      echo "$yaml_block" >> "$tmp_proxies"
+      # Extract name from first line
+      name="$(echo "$yaml_block" | head -1 | sed 's/^- name: //' | sed 's/^"//;s/"$//')"
+      echo "$name" >> "$tmp_names"
+    fi
+  done < "$tmp_input"
+
+  # Check results
+  if [ ! -s "$tmp_proxies" ]; then
+    printf '\033[1;31mError:\033[0m No valid proxies found\n' >&2
+    rm -f "$tmp_input" "$tmp_proxies" "$tmp_names"
+    exit 1
+  fi
+
+  local count
+  count="$(wc -l < "$tmp_names" | tr -d ' ')"
+
+  if [ "$proxies_only" -eq 1 ]; then
+    printf 'proxies:\n'
+    cat "$tmp_proxies"
+  else
+    printf '# OpenClash Config - Generated by clash-config-gen\n'
+    printf '# Date: %s\n\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    printf 'mixed-port: 7890\n'
+    printf 'port: 7891\n'
+    printf 'socks-port: 7892\n'
+    printf 'redir-port: 7893\n'
+    printf 'allow-lan: true\n'
+    printf 'mode: rule\n'
+    printf 'log-level: info\n'
+    printf 'ipv6: false\n'
+    printf 'external-controller: 0.0.0.0:9090\n'
+    printf 'external-ui: /usr/share/openclash/ui\n'
+    printf "secret: ''\n\n"
+    generate_dns "$dns_mode"
+    printf '\nproxies:\n'
+    cat "$tmp_proxies"
+    printf '\n'
+    generate_proxy_groups "$tmp_names"
+    printf '\n'
+    generate_rules
+  fi
+
+  printf '\n\033[1;32m%s proxy berhasil di-convert!\033[0m\n' "$count" >&2
+
+  rm -f "$tmp_input" "$tmp_proxies" "$tmp_names"
+}
+
+main "$@"

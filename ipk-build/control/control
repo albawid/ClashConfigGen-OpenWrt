@@ -1,0 +1,11 @@
+Package: clash-config-gen
+Version: 1.0.0-1
+Depends: libc, coreutils-base64
+Source: https://github.com/albawid/ClashConfigGen
+Section: net
+Architecture: all
+Maintainer: Albawid <albawid@users.noreply.github.com>
+Description: Clash Config Generator for OpenWrt - Convert VMess/VLESS/SS/Trojan URIs to OpenClash YAML
+  Converts proxy URIs (vmess://, vless://, ss://, trojan://) to 
+  OpenClash compatible YAML config. Output is terminal-friendly 
+  for easy copy-paste to OpenClash configuration.

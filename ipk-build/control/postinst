@@ -1,0 +1,14 @@
+#!/bin/sh
+case "$1" in
+  preinst)
+    ;;
+  postinst)
+    chmod +x /usr/bin/clash-config-gen
+    echo "clash-config-gen installed. Run: clash-config-gen -h"
+    ;;
+  prerm)
+    ;;
+  postrm)
+    echo "clash-config-gen removed."
+    ;;
+esac
