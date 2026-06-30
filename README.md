@@ -86,7 +86,7 @@ proxies:
   type: vmess
   server: biz02.wc-webkuy.web.id
   port: 80
-  uuid: 1ca8e13c-f8bb-4feb-a53d-1e059595f1b7
+  uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
   alterId: 0
   cipher: auto
   udp: true
@@ -184,12 +184,12 @@ Cara paling efisien:
 
 ### VMess TLS
 ```
-vmess://eyJhZG...yIn0=
+vmess://base64encoded...
 ```
 
 ### VMess nonTLS
 ```
-vmess://eyJhZG...yIn0=
+vmess://base64encoded...
 ```
 
 ### VLESS TLS
@@ -214,7 +214,7 @@ trojan://password@server.com:80?security=none&type=ws&path=%2Ftrojan&host=server
 
 ### Shadowsocks
 ```
-ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@server.com:8388#SS-Proxy
+ss://base64encoded@server.com:8388#SS-Proxy
 ```
 
 ---
