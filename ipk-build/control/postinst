@@ -1,14 +1,20 @@
 #!/bin/sh
 case "$1" in
-  preinst)
-    ;;
   postinst)
     chmod +x /usr/bin/clash-config-gen
-    echo "clash-config-gen installed. Run: clash-config-gen -h"
-    ;;
-  prerm)
+    # Ensure uhttpd can serve static files from /www
+    # LuCI cache needs clearing so new menu appears
+    rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null
+    # Restart uhttpd to pick up new LuCI controller
+    /etc/init.d/uhttpd restart 2>/dev/null || true
+    echo ""
+    echo "clash-config-gen installed successfully!"
+    echo "  LuCI UI: Services > Clash Config Gen"
+    echo "  CLI:     clash-config-gen -h"
     ;;
   postrm)
+    rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null
+    /etc/init.d/uhttpd restart 2>/dev/null || true
     echo "clash-config-gen removed."
     ;;
 esac

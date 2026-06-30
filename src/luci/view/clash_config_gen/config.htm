@@ -1,0 +1,129 @@
+<%#
+LuCI View - Clash Config Generator
+Client-side JS conversion, LuCI native look
+-%>
+
+<%+header%>
+
+<script src="/lsgi/clash-config-gen/converter.js"></script>
+
+<style>
+.ccg-wrap{max-width:940px;margin:0 auto}
+.ccg-card{background:#fff;border:1px solid #ccc;border-radius:6px;padding:20px;margin-bottom:16px}
+.ccg-card h3{margin:0 0 8px;font-size:15px;color:#333}
+.ccg-sub{font-size:12px;color:#777;margin:0 0 14px}
+.ccg-lbl{display:block;font-weight:bold;margin:8px 0 4px;color:#555;font-size:13px}
+.ccg-ta{width:100%;font-family:monospace;font-size:12px;border:1px solid #ccc;border-radius:4px;padding:8px;box-sizing:border-box;resize:vertical}
+.ccg-ta:focus{border-color:#4a90d9;outline:none}
+.ccg-row{display:flex;gap:12px;margin:10px 0;flex-wrap:wrap}
+.ccg-row>div{flex:1;min-width:170px}
+.ccg-sel{width:100%;padding:6px;border:1px solid #ccc;border-radius:4px;margin-top:4px}
+.ccg-btn{padding:8px 18px;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:bold;margin-right:6px}
+.ccg-btn-p{background:#4a90d9;color:#fff}.ccg-btn-p:hover{background:#3a7bc8}
+.ccg-btn-c{background:#5cb85c;color:#fff}.ccg-btn-c:hover{background:#4cae4c}
+.ccg-btn-x{background:#d9534f;color:#fff}.ccg-btn-x:hover{background:#c9302c}
+.ccg-bg{margin:14px 0}
+.ccg-st{font-size:12px;color:#666;margin:4px 0 8px}
+.ccg-out{position:relative}
+.ccg-pv{font-size:12px}
+.ccg-pv div{padding:3px 0;border-bottom:1px solid #eee}
+.ccg-toast{position:fixed;bottom:20px;right:20px;background:#333;color:#fff;padding:10px 20px;border-radius:4px;display:none;z-index:9999;font-size:13px}
+.ccg-toast.show{display:block}
+</style>
+
+<div class="ccg-wrap">
+<div class="ccg-card">
+  <h3>Clash Config Generator</h3>
+  <p class="ccg-sub">Convert VMess / VLESS / SS / Trojan → OpenClash YAML &bull; 100% Local</p>
+
+  <label class="ccg-lbl">Input Proxy URIs :</label>
+  <textarea id="ccg-in" class="ccg-ta" rows="6" placeholder="Paste link config di sini, multi links dipisahkan enter atau |"></textarea>
+
+  <div class="ccg-row">
+    <div>
+      <label class="ccg-lbl">Jenis Config :</label>
+      <select id="ccg-ctype" class="ccg-sel">
+        <option value="standard-redir">Standard - Redir Host</option>
+        <option value="standard-fakeip">Standard - Fake IP</option>
+        <option value="meta">Clash.Meta</option>
+      </select>
+    </div>
+    <div>
+      <label class="ccg-lbl">DNS Mode :</label>
+      <select id="ccg-dns" class="ccg-sel">
+        <option value="redir-host">Redir Host</option>
+        <option value="fake-ip">Fake IP</option>
+      </select>
+    </div>
+    <div>
+      <label class="ccg-lbl">Output :</label>
+      <div style="margin-top:8px"><label><input type="checkbox" id="ccg-ponly"> Proxies Only (copy-paste ke OpenClash)</label></div>
+    </div>
+  </div>
+
+  <div class="ccg-bg">
+    <button class="ccg-btn ccg-btn-p" onclick="ccgGen()">Generate</button>
+    <button class="ccg-btn ccg-btn-c" onclick="ccgCp()">Copy Output</button>
+    <button class="ccg-btn ccg-btn-x" onclick="ccgClr()">Clear</button>
+  </div>
+</div>
+
+<div class="ccg-card" id="ccg-out-card" style="display:none">
+  <h3>Output Config</h3>
+  <div id="ccg-status" class="ccg-st"></div>
+  <div class="ccg-out">
+    <textarea id="ccg-out" class="ccg-ta" rows="15" readonly></textarea>
+  </div>
+  <label class="ccg-lbl" style="margin-top:12px">Preview Proxy :</label>
+  <div id="ccg-preview" class="ccg-pv"></div>
+</div>
+</div>
+
+<div class="ccg-toast" id="ccg-toast"></div>
+
+<script>
+function ccgGen(){
+  var input=document.getElementById('ccg-in').value.trim();
+  if(!input){ccgToast('Masukkan link config dulu!');return}
+  var ponly=document.getElementById('ccg-ponly').checked;
+  var ctype=document.getElementById('ccg-ctype').value;
+  var dnsMode=ctype==='standard-fakeip'?'fake-ip':document.getElementById('ccg-dns').value;
+  var uris=[];
+  input.split(/[\n|]/).forEach(function(l){l=l.trim();if(l.indexOf('://')!==-1)uris.push(l)});
+  if(!uris.length){ccgToast('Tidak ditemukan URI proxy yang valid!');return}
+  var proxies=[],errors=[];
+  uris.forEach(function(u,i){
+    try{var p=Converter.parseUri(u);if(!p){errors.push('['+(i+1)+'] Format tidak dikenali');return}
+    proxies.push(Converter.toClashProxy(p.proto,p.data))}
+    catch(e){errors.push('['+(i+1)+'] Error: '+e.message)}
+  });
+  if(!proxies.length){ccgToast('Tidak ada proxy yang valid!');return}
+  var yaml,names=proxies.map(function(p){return p.name});
+  if(ponly){yaml='proxies:\n'+Converter.toYaml(proxies)}
+  else{var cfg=Converter.generateConfig(proxies,{configType:ctype,proxyFormat:'bottom',proxyProvider:false,vmessReverse:false});
+  yaml='# OpenClash Config - Generated locally\n# Date: '+new Date().toISOString().replace('T',' ').substring(0,19)+'\n# Proxies: '+proxies.length+'\n\n'+Converter.toYaml(cfg)}
+  document.getElementById('ccg-out-card').style.display='block';
+  document.getElementById('ccg-out').value=yaml;
+  document.getElementById('ccg-status').textContent=proxies.length+' proxy berhasil di-convert'+(errors.length?' | '+errors.length+' error':'');
+  document.getElementById('ccg-preview').innerHTML=proxies.map(function(p){
+    return'<div><strong>'+p.name+'</strong> <span style="color:#999">('+p.type.toUpperCase()+')</span> <span style="color:#aaa">'+p.server+':'+p.port+'</span></div>'
+  }).join('');
+  ccgToast(proxies.length+' proxy berhasil di-convert!')
+}
+function ccgCp(){
+  var o=document.getElementById('ccg-out');if(!o.value){ccgToast('Belum ada output!');return}
+  o.select();if(navigator.clipboard){navigator.clipboard.writeText(o.value).then(function(){ccgToast('Config berhasil di-copy!')})}
+  else{document.execCommand('copy');ccgToast('Config berhasil di-copy!')}
+}
+function ccgClr(){
+  document.getElementById('ccg-in').value='';document.getElementById('ccg-out').value='';
+  document.getElementById('ccg-preview').innerHTML='';document.getElementById('ccg-out-card').style.display='none';
+  document.getElementById('ccg-status').textContent='';ccgToast('Form dibersihkan')
+}
+function ccgToast(m){
+  var t=document.getElementById('ccg-toast');t.textContent=m;t.classList.add('show');
+  setTimeout(function(){t.classList.remove('show')},2000)
+}
+</script>
+
+<%+footer%>
